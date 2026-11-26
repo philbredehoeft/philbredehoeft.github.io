@@ -972,7 +972,7 @@
             const prevInit = prevMap.get(String(en.name).toLowerCase());
             const fallbackInit = Number.isFinite(prevInit)
               ? prevInit
-              : Math.max(1, (Number.isFinite(playerInit) ? playerInit : 12) - 1 - idx);
+              : Math.max(1, (Number.isFinite(playerInit) ? playerInit : 12) + 3 - idx);
             addEntry(en.name, fallbackInit, false);
           }
         });
@@ -1009,6 +1009,7 @@
       const roundNum = Math.max(1, Number(state.combatState?.round) || 1);
       roundEl.textContent = `Round ${roundNum}`;
 
+      const actedSet = new Set((Array.isArray(state.combatState?.roundActorsActed) ? state.combatState.roundActorsActed : []).map((x) => String(x).toLowerCase()));
       const currentTurn = String(state.combatState?.current_turn || '').toLowerCase();
       const enemies = Array.isArray(state.combatState?.enemies) ? state.combatState.enemies : [];
 
@@ -1020,15 +1021,19 @@
 
         let statusHtml = '';
         let isDefeated = false;
+        let hasActed = false;
         if (item.isPlayer) {
+          hasActed = actedSet.has('player');
           const hp = state.parsedChar?.hp;
           const maxHp = state.parsedChar?.maxHp;
           const ac = state.parsedChar?.ac;
           const hpStr = (hp !== null && maxHp !== null) ? `HP ${hp}/${maxHp}` : '';
           const acStr = ac !== null ? `AC ${ac}` : '';
-          const meta = [acStr, hpStr].filter(Boolean).join(' · ');
+          const actedTag = hasActed ? ' · Acted' : '';
+          const meta = [acStr, hpStr].filter(Boolean).join(' · ') + actedTag;
           if (meta) statusHtml = `<span class="text-[11px] text-emerald-300 font-semibold">${escapeHtml(meta)}</span>`;
         } else {
+          hasActed = actedSet.has(item.name.toLowerCase()) || actedSet.has(item.name.split(/\s+/)[0].toLowerCase());
           const matchedEnemy = enemies.find((e) =>
             e && e.name && (e.name.toLowerCase() === item.name.toLowerCase()
               || e.name.toLowerCase().includes(item.name.toLowerCase())
@@ -1040,9 +1045,10 @@
             const st = String(matchedEnemy.status || '').trim();
             isDefeated = hp <= 0 || /defeated|dead|slain/i.test(st);
             const stTag = st && !/^active|healthy|alive|defeated$/i.test(st) ? ` (${st})` : '';
+            const actedTag = !isDefeated && hasActed ? ' · Acted' : '';
             statusHtml = isDefeated
               ? `<span class="text-[11px] text-stone-500 font-medium">Defeated</span>`
-              : `<span class="text-[11px] text-rose-200">AC ${Number(matchedEnemy.ac) || '?'} · <strong class="text-emerald-300">${hp}/${maxHp}</strong>${escapeHtml(stTag)}</span>`;
+              : `<span class="text-[11px] text-rose-200">AC ${Number(matchedEnemy.ac) || '?'} · <strong class="text-emerald-300">${hp}/${maxHp}</strong>${escapeHtml(stTag)}${escapeHtml(actedTag)}</span>`;
           }
         }
 
@@ -1050,12 +1056,12 @@
           ? 'bg-amber-500/20 border-amber-400/60 text-amber-200'
           : 'bg-rose-500/15 border-rose-500/40 text-rose-200';
         const activeRing = isCurrent && !isDefeated ? 'ring-1 ring-amber-300/80 bg-amber-500/15' : 'bg-black/25';
-        const nameClass = isDefeated ? 'line-through text-stone-500' : 'text-stone-100';
+        const nameClass = isDefeated ? 'line-through text-stone-500' : (hasActed ? 'text-stone-300' : 'text-stone-100');
 
         return `<li class="flex items-center justify-between gap-2 px-2.5 py-1 rounded-lg border border-stone-800/90 ${activeRing}">
           <div class="flex items-center gap-2 min-w-0">
             <span class="text-[10px] font-bold text-stone-400 w-4">${idx + 1}.</span>
-            <span class="font-medium truncate ${nameClass}">${isCurrent && !isDefeated ? '► ' : ''}${escapeHtml(item.name)}</span>
+            <span class="font-medium truncate ${nameClass}">${isCurrent && !isDefeated ? '► ' : (hasActed ? '✓ ' : '')}${escapeHtml(item.name)}</span>
           </div>
           <div class="flex items-center gap-2 shrink-0">
             ${statusHtml}
@@ -2609,10 +2615,32 @@ function ensureCombatEconomy() {
       const isInitiativeRoll = /\binitiative\b/.test(rollLabel);
 
       if (isInitiativeRoll) {
+        const board = Array.isArray(state.initiativeBoard) && state.initiativeBoard.length > 0
+          ? state.initiativeBoard
+          : extractCombatantInitiatives(combatObj, dmNarrative, rollObj);
+        const playerEntry = board.find((b) => b.isPlayer);
+        const playerInit = Number(playerEntry?.initiative ?? rollObj?.total ?? 10);
+
+        // Any enemy with initiative > playerInit acts first on Round 1
+        activeEnemies.forEach((en) => {
+          const enBoardItem = board.find((b) => !b.isPlayer && (
+            b.name.toLowerCase() === en.name.toLowerCase()
+            || b.name.toLowerCase().includes(en.name.toLowerCase())
+            || en.name.toLowerCase().includes(b.name.toLowerCase())
+          ));
+          const enInit = Number(enBoardItem?.initiative ?? 12);
+          if (enInit > playerInit) {
+            acted.add(en.name.toLowerCase());
+            acted.add(en.name.split(/\s+/)[0].toLowerCase());
+          }
+        });
+
+        const firstActer = board[0]?.name || combatObj.current_turn || state.characterName || 'Kael Vance';
         return {
           ...combatObj,
           round: Math.max(1, Number(combatObj.round) || 1),
-          roundActorsActed: [],
+          current_turn: firstActer,
+          roundActorsActed: Array.from(acted),
         };
       }
 
@@ -2621,24 +2649,32 @@ function ensureCombatEconomy() {
         acted.add('player');
       }
 
-      const enemyActedInProse = activeEnemies.some((en) => {
-        const enFirst = String(en.name || '').trim().split(/\s+/)[0];
-        if (!enFirst) return false;
-        return new RegExp(`\\b${escapeRegex(enFirst)}\\b[^\\n.]{0,90}\\b(?:attack|slash|slam|bite|claw|strike|lunge|fires?|casts?)\\b`, 'i').test(dmNarrative || '');
+      activeEnemies.forEach((en) => {
+        const enFull = String(en.name || '').trim().toLowerCase();
+        const enFirst = enFull.split(/\s+/)[0];
+        const mentioned = (enFull && new RegExp(`\b${escapeRegex(enFull)}\b`, 'i').test(dmNarrative || ''))
+          || (enFirst && new RegExp(`\b${escapeRegex(enFirst)}\b[^\n.]{0,110}\b(?:attack|slash|slam|bite|claw|strike|lunge|fires?|casts?|hurls?|flanks?|darts?)\b`, 'i').test(dmNarrative || ''));
+        if (mentioned) {
+          acted.add(enFull);
+          if (enFirst) acted.add(enFirst);
+        }
       });
 
-      if (enemyActedInProse) {
-        activeEnemies.forEach((en) => acted.add(String(en.name).toLowerCase()));
-      }
-
-      const allEnemiesActed = activeEnemies.every((en) => acted.has(String(en.name).toLowerCase()));
+      const allEnemiesActed = activeEnemies.every((en) => {
+        const enFull = String(en.name || '').trim().toLowerCase();
+        const enFirst = enFull.split(/\s+/)[0];
+        return acted.has(enFull) || (enFirst && acted.has(enFirst));
+      });
       const playerActed = acted.has('player');
 
       if (playerActed && allEnemiesActed) {
         const nextRound = (Number(combatObj.round) || 1) + 1;
+        const board = Array.isArray(state.initiativeBoard) ? state.initiativeBoard : [];
+        const nextFirst = board[0]?.name || state.characterName || 'Kael Vance';
         return {
           ...combatObj,
           round: nextRound,
+          current_turn: nextFirst,
           roundActorsActed: [],
           economy: {
             ...(combatObj.economy || {}),
@@ -3056,7 +3092,12 @@ TWO MODES (Story Mode vs. Turn-Based Combat Mode):
 
 COMBAT & ENEMY AGENCY:
 - NEVER AUTO-ROLL PLAYER DICE OR INVENT ROLL TOTALS: You roll NPC/enemy dice (Initiative, Attacks, Damage, Saves) and resolve NPC/enemy turns completely in prose. Never roll ${activeChar}'s d20/damage/saves, and NEVER override or re-roll the player's submitted roll total—always treat the exact total shown in the player's roll message as ground truth (e.g., if the player rolled 9 against AC 14, it is a MISS, even if a d8 was rolled for Precision Attack).
-- ENEMY INITIATIVE TURN: Whenever an enemy has higher Initiative than ${activeChar} (or acts before ${activeChar} in the round), resolve that enemy's full turn right now in "narrative"—movement, attack roll, hit/miss, and damage/effect against ${activeChar}—and apply any HP loss to ${activeChar} via "hp_delta" and "current_hp". Do NOT stop after moving into melee range without attacking unless the enemy is specifically using a non-attack action/telegraph.
+- ENEMY INITIATIVE TURN & CLEAR PER-ENEMY TURN MARKERS: Whenever one or more enemies have higher Initiative than ${activeChar} (or act before ${activeChar} in the round), resolve EVERY higher-initiative enemy's full turn right now in "narrative" in initiative order. Clearly mark each enemy taking its turn with a bold turn header and inline roll math—for example:
+  **Ash-Goblin A's Turn** — [Ash-Goblin A Attack: d20 (14) + 4 = 18 vs AC 17 — Hit! Damage: 1d4 (3) + 2 = 5 | Kael HP: 27 -> 22]
+  **Ash-Goblin B's Turn** — [Ash-Goblin B Attack: ...]
+  **Ash-Goblin C's Turn** — [Ash-Goblin C Attack: ...]
+  Never leave multiple goblins half-resolved as flavor if they have higher Initiative; give each acting enemy its own clear turn beat and roll line before handing the turn to ${activeChar}.
+- FREEFORM ACTION EXECUTION (NO STALLING): When ${activeChar} states a clear combat or movement action in free text (such as "let do a Precision attack right into that weakness"), commit directly to that action—describe ${activeChar} executing the move and immediately prompt the corresponding roll (e.g. Precision Attack roll) rather than merely repeating preparation and stalling.
 - PLAYER ATTACKS & HITS VS. MISSES: When ${activeChar} initiates an unrolled attack, prompt their Attack roll first. Once the player submits an Attack roll:
   * If total < enemy AC -> IT IS A MISS. Describe the miss in prose, do NOT offer damage rolls, expend superiority dice only if the character sheet specifies using Precision Attack before/after seeing the roll, and present ${activeChar}'s next turn/reaction options.
   * If total >= enemy AC -> IT IS A HIT. Immediately prompt ${activeChar}'s Damage roll right now in "suggested_rolls" (do NOT skip ahead to enemy retaliation or next-turn actions before ${activeChar} rolls damage for the hit, and only include maneuver bonus damage like Trip Attack if that maneuver was used on a hit).
