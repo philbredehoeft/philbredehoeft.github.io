@@ -2754,10 +2754,15 @@ function applyRestAndConditionRules(actionText, dmNarrative = '') {
         changed = true;
       }
 
+      // === START: CLASS-AGNOSTIC REST & RESOURCE RECHARGE ===
+      const charMdLower = String(state.files.character.content || '').toLowerCase();
       const targetResList = state.parsedChar.resources || parsed.resources || [];
       targetResList.forEach((res) => {
         const nameLower = String(res.name || '').toLowerCase();
-        const shouldRefill = isLongRest || /\b(superiority|pact|ki|channel\s*divinity|second\s*wind)\b/.test(nameLower);
+        const escapedName = escapeRegex(nameLower);
+        const markedShortRestInMd = new RegExp(`${escapedName}[^\n]{0,45}\bshort\s*rest\b`, 'i').test(charMdLower);
+        const isStandardShortRestPool = /\b(superiority|pact|ki|focus|channel\s*divinity|second\s*wind|arcane\s*recovery|bardic\s*inspiration|wild\s*shape|war\s*priest|bladesong)\b/.test(nameLower);
+        const shouldRefill = isLongRest || markedShortRestInMd || isStandardShortRestPool;
         if (shouldRefill && res.cur < res.max) {
           res.cur = res.max;
           if (state.files.character.content) {
@@ -2771,6 +2776,7 @@ function applyRestAndConditionRules(actionText, dmNarrative = '') {
           changed = true;
         }
       });
+      // === END: CLASS-AGNOSTIC REST & RESOURCE RECHARGE ===
 
       if (state.combatState?.economy) {
         state.combatState.economy.dodging = false;
@@ -2993,32 +2999,30 @@ function applyRestAndConditionRules(actionText, dmNarrative = '') {
           return copy;
         });
 
+      // === START: CLASS-AGNOSTIC DAMAGE FALLBACK ===
       if (econ.lastRollType === 'attack' && econ.lastRollHit === true) {
         const hasDamageOption = cleaned.some((c) => classifySuggestedRoll(c) === 'damage');
         if (!hasDamageOption) {
+          const charMd = String(state.files.character.content || '');
+          const dmgSpecMatch = charMd.match(/\b(\d+)d(4|6|8|10|12)\s*([+-]\s*\d+)?\b/i);
+          const baseCount = dmgSpecMatch ? Math.max(1, Number(dmgSpecMatch[1])) : 1;
+          const baseSides = dmgSpecMatch ? Number(dmgSpecMatch[2]) : 8;
+          const baseMod = dmgSpecMatch && dmgSpecMatch[3] ? Number(dmgSpecMatch[3].replace(/\s+/g, '')) : 0;
+          const modLabel = baseMod === 0 ? '' : (baseMod > 0 ? `+${baseMod}` : `${baseMod}`);
+
           cleaned.unshift({
-            label: 'Weapon Damage Roll',
-            skill: 'Damage (1d8+3)',
-            sides: 8,
-            dice_count: 1,
-            mod: 3,
+            label: 'Damage Roll',
+            requires_roll: true,
+            skill: `Damage (${baseCount}d${baseSides}${modLabel})`,
+            sides: baseSides,
+            dice_count: baseCount,
+            mod: baseMod,
             dc: 0,
-            action: 'Roll weapon damage against the target.'
+            action: 'Roll damage against the target.'
           });
-          const supRes = (state.parsedChar?.resources || []).find((r) => /superiority/i.test(r.name));
-          if (!supRes || supRes.cur > 0) {
-            cleaned.push({
-              label: 'Trip Attack Damage (+1d8 + STR Save)',
-              skill: 'Damage + Trip Attack (2d8+3)',
-              sides: 8,
-              dice_count: 2,
-              mod: 3,
-              dc: 0,
-              action: 'Expend 1 Superiority Die for Trip Attack damage (+1d8) and knock prone.'
-            });
-          }
         }
       }
+      // === END: CLASS-AGNOSTIC DAMAGE FALLBACK ===
 
       return cleaned.slice(0, 3);
     }
@@ -3084,9 +3088,9 @@ COMBAT & ENEMY AGENCY:
   * If total >= enemy AC -> IT IS A HIT. Immediately prompt ${activeChar}'s Damage roll right now in "suggested_rolls" (do NOT skip ahead to enemy retaliation or next-turn actions before ${activeChar} rolls damage for the hit, and only include maneuver bonus damage like Trip Attack if that maneuver was used on a hit).
 - ACCURATE 5E CONDITIONS, ADVANTAGE & MANEUVERS:
   * Prone Condition: While Prone, a creature's attacks have DISADVANTAGE, melee attacks within 5 ft against it have ADVANTAGE, ranged attacks against it have DISADVANTAGE, and standing up costs half its movement (or its turn if immobilized). Always apply Disadvantage when a Prone enemy attacks!
-  * Precision Attack: adds +1d8 to the ATTACK roll ONLY (never added to damage).
-  * Trip Attack: triggers ON A MELEE HIT, adding +1d8 to DAMAGE and forcing a STR save (knocking target Prone on failure; update enemy "status" to "Prone").
-  * Action Surge grants an extra Action; Potion of Healing is 2d4+2 (dice_count: 2, sides: 4, mod: 2).
+  * CHARACTER SHEET CLASS GIMMICKS & HOMEBREW RULES: Read the active Character sheet carefully for all class-specific features, spellcasting/metamagic/pact slots, maneuvers, stances, companions, or homebrew mechanics. Enforce their exact trigger timing (before roll vs. on hit vs. Bonus Action vs. Reaction), resource cost ("resource_updates"), and save DCs.
+  * Bonus Attack Dice vs. Bonus Damage Dice: Features that add a bonus die to an ATTACK roll (e.g. Precision Attack, Bardic Inspiration, Guided Strike) apply ONLY to the attack roll—never add them to damage. Features that trigger ON A HIT (e.g. Divine Smite, Sneak Attack, Trip Attack, Hex/Hunter's Mark) apply ONLY after a confirmed hit.
+  * Extra Actions & Healing: Features granting an extra Action (e.g. Action Surge, Haste) allow an additional action on that turn; Potion of Healing is 2d4+2 (dice_count: 2, sides: 4, mod: 2).
 - ACTIVE ENEMIES & TELEGRAPHED INTENT: Basic mobs do NOT get free Ripostes on every missed player swing, but Bosses/Elites may have a defined 1/round Reaction, and ALL active enemies must still fight back on their own turns, take Opportunity Attacks when the player moves away without Disengaging, and set a concrete next-turn threat in each enemy's "intent" field.
 - TELEGRAPH AT ROUND END: At the end of a combat round, weave what active enemies are preparing next into "narrative" so the player feels the threat closing in.
 - RECORD ALL ROLLS INLINE: e.g. [Sentry Slam: d20 (14) + 4 = 18 vs AC 17 — Hit! Damage: 1d8 (5) + 3 = 8 | Kael HP: 22 -> 14], [Kael Damage: 1d8 (6) + 3 = 9 | Sentry HP: 14 -> 5].
@@ -3113,7 +3117,7 @@ WRITING & SUGGESTED ROLLS:
   * CHOICE VARIETY RULE: In Story Mode, whenever you offer 3 choices, include at least 1-2 options with "requires_roll": false alongside 1-2 riskier options with "requires_roll": true.
   * SELECTIVE AUTO-ROLL IN STORY MODE (auto_roll): Only when ${activeChar} enters a new hazard/ambush zone or passive environmental awareness could uncover a hidden clue/trap without stealing player agency, set "auto_roll": { "trigger": true, "skill": "Perception", "mod": <char mod>, "dc": <DC>, "stakes": "<what is noticed or missed>" }. For normal turns, set "auto_roll": { "trigger": false, "skill": "", "mod": 0, "dc": 0, "stakes": "" }.
 - Regular Combat / Story choices: frame 3 distinct tactical risk/reward trade-offs for ${activeChar} (e.g. Reckless/Advantage vs. Shield Wall/Defensive vs. Terrain/Class Skill or Social dialogue when talkable NPCs exist). For ${activeChar}'s Attack rolls, set "dc" to enemy AC.
-- When offering a Battle Master maneuver option (like Precision Attack), write the action clearly (e.g. "Use Maneuver Precision: Attack and add 1d8 to the roll") and set "skill" to include "+1d8" so the roll summary reads cleanly.
+- When offering a class feature or maneuver that adds a bonus die to a roll (such as Precision Attack, Bardic Inspiration, or Guidance), state the bonus die clearly in "action" and include "+1dX" in "skill" (e.g. "Attack +1d8") so the dice tray pre-selects the bonus die cleanly.
 
 Return ONLY valid JSON matching schema.
 
